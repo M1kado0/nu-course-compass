@@ -1,3 +1,5 @@
 .venv
 AGENTS.md
 .DS_Store
+.env
+graphify-out/
