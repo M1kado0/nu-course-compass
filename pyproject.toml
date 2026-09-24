@@ -1,0 +1,19 @@
+[project]
+name = "nu-course-compass"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "M1kado0", email = "sagataldiyar@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.14.0",
+]
+
+[project.scripts]
+nu-course-compass = "nu_course_compass:main"
+
+[build-system]
+requires = ["uv_build>=0.12.18,<0.13.0"]
+build-backend = "uv_build"
