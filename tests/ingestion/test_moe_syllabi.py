@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -8,6 +9,8 @@ import httpx
 import pytest
 from langchain_core.documents import Document
 from docx import Document as WordDocument
+from transformers import PreTrainedTokenizerBase
+from nu_course_compass.ingestion import load_syllabus_documents as syllabus_loader
 from nu_course_compass.ingestion import import_moe_syllabi
 
 from nu_course_compass.ingestion.import_moe_syllabi import (
@@ -21,6 +24,20 @@ from nu_course_compass.ingestion.import_moe_syllabi import (
 )
 from nu_course_compass.ingestion.load_syllabus_documents import load_syllabus_documents
 from nu_course_compass.ingestion.moe_sheet import SyllabusIndexRow, parse_sheet_grid
+
+
+class OfflineTokenizer(PreTrainedTokenizerBase):
+    def tokenize(self, text: str, **kwargs) -> list[str]:
+        # Words compress to one token; separators still consume tokens.
+        return re.findall(r"\w+|[^\w]", text)
+
+
+@pytest.fixture(autouse=True)
+def offline_syllabus_tokenizer(monkeypatch):
+    tokenizer = OfflineTokenizer()
+    monkeypatch.setattr(syllabus_loader.AutoTokenizer, "from_pretrained",
+                        lambda *args, **kwargs: tokenizer)
+    return tokenizer
 
 
 def cell(value: str = "", link: str | None = None) -> dict:
@@ -443,10 +460,10 @@ def test_docx_chunk_tracks_paragraph_and_table_row_positions(tmp_path: Path) -> 
     assert chunks[0].page_content.index("Vision | 10") < chunks[0].page_content.index("Closing paragraph")
 
 
-def test_docx_long_document_chunks_on_block_boundaries(tmp_path: Path) -> None:
+def test_docx_long_document_chunks_on_block_boundaries(tmp_path: Path, offline_syllabus_tokenizer) -> None:
     word = WordDocument()
     for number in range(1, 6):
-        word.add_paragraph(f"Block {number}: " + "x" * 850)
+        word.add_paragraph(f"Block {number}: " + "longword " * 200)
     path = tmp_path / "long.docx"
     word.save(path)
     record = row("https://drive.google.com/file/d/long/view").to_dict() | {
@@ -463,9 +480,76 @@ def test_docx_long_document_chunks_on_block_boundaries(tmp_path: Path) -> None:
     assert [(chunk.metadata["block_start"], chunk.metadata["block_end"])
             for chunk in chunks] == [(1, 2), (3, 4), (5, 5)]
     assert len({chunk.metadata["document_id"] for chunk in chunks}) == 3
-    assert all(len(chunk.page_content) <= 2400 for chunk in chunks)
+    assert all(len(offline_syllabus_tokenizer.tokenize(chunk.page_content)) <= syllabus_loader.CHUNK_SIZE
+               for chunk in chunks)
+    assert any(len(chunk.page_content) > syllabus_loader.CHUNK_SIZE for chunk in chunks)
     assert [chunk.page_content.count(f"Block {number}:") for number in range(1, 6)
             for chunk in chunks if f"Block {number}:" in chunk.page_content] == [1] * 5
+
+
+@pytest.mark.parametrize(("budget", "blocks", "expected_ranges"), [
+    (8, [("paragraph", "a b"), ("table", "c d")], [(1, 2)]),
+    (7, [("paragraph", "a b"), ("table", "c d")], [(1, 1), (2, 2)]),
+    (8, [("paragraph", "x" * 1000)], [(1, 1)]),
+    (8, [("paragraph", "a b"), ("heading", "New"),
+         ("table", "c d")], [(1, 1), (2, 3)]),
+])
+def test_docx_token_budget_preserves_source_blocks(
+    tmp_path: Path, monkeypatch, offline_syllabus_tokenizer,
+    budget, blocks, expected_ranges,
+) -> None:
+    monkeypatch.setattr(syllabus_loader, "CHUNK_SIZE", budget)
+    word = WordDocument()
+    for kind, text in blocks:
+        if kind == "table":
+            word.add_table(rows=1, cols=1).cell(0, 0).text = text
+        elif kind == "heading":
+            word.add_heading(text, level=1)
+        else:
+            word.add_paragraph(text)
+    path = tmp_path / "budget.docx"
+    word.save(path)
+    record = row("https://drive.google.com/file/d/budget/view").to_dict() | {
+        "status": "downloaded", "local_path": path.name,
+        "content_type": syllabus_loader.DOCX,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "retrieved_at": "2026-09-30T00:00:00+00:00",
+    }
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(json.dumps(record) + "\n")
+
+    chunks = load_syllabus_documents(manifest)
+
+    assert [(c.metadata["block_start"], c.metadata["block_end"])
+            for c in chunks] == expected_ranges
+    assert all(len(offline_syllabus_tokenizer.tokenize(c.page_content)) <= budget for c in chunks)
+    assert "\n\n".join(c.page_content for c in chunks) == "\n\n".join(text for _, text in blocks)
+    assert all(c.metadata["parser_version"] == "python-docx-token-block-v3" for c in chunks)
+    assert all("page" not in c.metadata for c in chunks)
+
+
+def test_docx_oversized_block_uses_token_splitter(tmp_path: Path, monkeypatch, offline_syllabus_tokenizer) -> None:
+    monkeypatch.setattr(syllabus_loader, "CHUNK_SIZE", 5)
+    word = WordDocument()
+    word.add_table(rows=1, cols=1).cell(0, 0).text = "alpha beta gamma delta epsilon zeta"
+    path = tmp_path / "oversized.docx"
+    word.save(path)
+    record = row("https://drive.google.com/file/d/oversized/view").to_dict() | {
+        "status": "downloaded", "local_path": path.name,
+        "content_type": syllabus_loader.DOCX,
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "retrieved_at": "2026-09-30T00:00:00+00:00",
+    }
+    manifest = tmp_path / "manifest.jsonl"
+    manifest.write_text(json.dumps(record) + "\n")
+
+    chunks = load_syllabus_documents(manifest)
+
+    assert len(chunks) > 1
+    assert all(len(offline_syllabus_tokenizer.tokenize(c.page_content)) <= 5 for c in chunks)
+    assert all(c.metadata["block_start"] == c.metadata["block_end"] == 1 for c in chunks)
+    assert [c.metadata["part_index"] for c in chunks] == list(range(len(chunks)))
+    assert " ".join(c.page_content for c in chunks) == "alpha beta gamma delta epsilon zeta"
 
 
 def test_loader_rejects_changed_or_unsafe_snapshots(tmp_path: Path) -> None:

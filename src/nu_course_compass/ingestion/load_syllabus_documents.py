@@ -13,9 +13,9 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from transformers import AutoTokenizer
 
 PARSER_VERSION = "pymupdf-page-v1"
-DOCX_PARSER_VERSION = "python-docx-block-v2"
+DOCX_PARSER_VERSION = "python-docx-token-block-v3"
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-CHUNK_SIZE = 2048
+CHUNK_SIZE = 1024
 
 
 def _load_docx_blocks(path: Path) -> list[Document]:
@@ -62,7 +62,8 @@ def _load_docx_blocks(path: Path) -> list[Document]:
 
 
 def _chunk_docx_blocks(
-    blocks: list[Document], splitter: RecursiveCharacterTextSplitter
+    blocks: list[Document], splitter: RecursiveCharacterTextSplitter,
+    token_count: Callable[[str], int],
 ) -> list[Document]:
     """Pack whole source blocks; split only an oversized individual block."""
     chunks: list[Document] = []
@@ -82,7 +83,7 @@ def _chunk_docx_blocks(
         pending.clear()
 
     for block in blocks:
-        if len(block.page_content) > CHUNK_SIZE:
+        if token_count(block.page_content) > CHUNK_SIZE:
             flush()
             for part_index, part in enumerate(splitter.split_text(block.page_content)):
                 chunks.append(Document(
@@ -94,8 +95,8 @@ def _chunk_docx_blocks(
                               "part_index": part_index},
                 ))
             continue
-        pending_length = sum(len(item.page_content) for item in pending) + max(len(pending) - 1, 0) * 2
-        if pending and (pending_length + 2 + len(block.page_content) > CHUNK_SIZE
+        candidate = "\n\n".join([item.page_content for item in pending] + [block.page_content])
+        if pending and (token_count(candidate) > CHUNK_SIZE
                         or pending[0].metadata["section_index"] != block.metadata["section_index"]):
             flush()
         pending.append(block)
@@ -110,8 +111,13 @@ def load_syllabus_documents(
 ) -> list[Document]:
     """Load each downloaded record while retaining sheet and source locations."""
 
+    tokenizer = AutoTokenizer.from_pretrained('infgrad/Jasper-Token-Compression-600M')
+    # Match LangChain's Hugging Face length function, without special tokens.
+    def token_count(text: str) -> int:
+        return len(tokenizer.tokenize(text))
+
     splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
-        AutoTokenizer.from_pretrained('infgrad/Jasper-Token-Compression-600M'),
+        tokenizer,
         chunk_size=CHUNK_SIZE,
         chunk_overlap=int(CHUNK_SIZE / 10),
     )
@@ -135,7 +141,7 @@ def load_syllabus_documents(
             raise ValueError(f"Snapshot checksum mismatch: {filename}")
         is_docx = record.get("content_type") == DOCX or path.suffix.lower() == ".docx"
         if is_docx:
-            pages = _chunk_docx_blocks(_load_docx_blocks(path), splitter)
+            pages = _chunk_docx_blocks(_load_docx_blocks(path), splitter, token_count)
             parser_version = DOCX_PARSER_VERSION
         else:
             if loader_factory is None:
