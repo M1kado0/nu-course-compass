@@ -1,5 +1,8 @@
 .venv
-AGENTS.md
 .DS_Store
 .env
 graphify-out/
+data/
+__pycache__/
+.pytest_cache/
+:memory:.ses
