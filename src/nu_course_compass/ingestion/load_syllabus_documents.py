@@ -10,11 +10,12 @@ from typing import Callable
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from transformers import AutoTokenizer
 
 PARSER_VERSION = "pymupdf-page-v1"
 DOCX_PARSER_VERSION = "python-docx-block-v2"
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-CHUNK_SIZE = 2400
+CHUNK_SIZE = 2048
 
 
 def _load_docx_blocks(path: Path) -> list[Document]:
@@ -108,7 +109,12 @@ def load_syllabus_documents(
     loader_factory: Callable[[Path], list[Document]] | None = None,
 ) -> list[Document]:
     """Load each downloaded record while retaining sheet and source locations."""
-    splitter = RecursiveCharacterTextSplitter(chunk_size=CHUNK_SIZE, chunk_overlap=250)
+
+    splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
+        AutoTokenizer.from_pretrained('infgrad/Jasper-Token-Compression-600M'),
+        chunk_size=CHUNK_SIZE,
+        chunk_overlap=int(CHUNK_SIZE / 10),
+    )
     documents: dict[str, Document] = {}
     current_records: dict[str, dict[str, object]] = {}
     for line in manifest_path.read_text(encoding="utf-8").splitlines():
