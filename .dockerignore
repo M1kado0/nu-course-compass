@@ -1,0 +1,29 @@
+# Keep the Docker build context small and reproducible.
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Secrets — never bake into the image (passed at runtime via env_file)
+.env
+
+# Local-only data / runtime artifacts
+data/raw/
+*.log
+
+# VCS / editor / OS
+.git/
+.gitignore
+.DS_Store
+.vscode/
+.idea/
+
+# Docs & notebooks aren't needed in the runtime image
+docs/
+notebooks/
+*.ipynb
+
+:memory:.ses
